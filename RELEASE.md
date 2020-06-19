@@ -137,6 +137,9 @@
 *   Depends on `tensorflow-transform>=0.25,<0.26`.
 *   Depends on `tfx-bsl>=0.25,<0.26`.
 
+*   Added BigQueryToElwcExampleGen to take a query as input and generate
+    ELWC(ExampleListAsContext) examples.
+
 ## Documentation updates
 
 *   N/A
