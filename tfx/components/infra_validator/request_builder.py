@@ -18,6 +18,7 @@ from __future__ import division
 from __future__ import print_function
 
 import abc
+import enum
 import os
 from typing import Any, Iterable, List, Mapping, Optional, Text
 
@@ -26,14 +27,10 @@ import six
 import tensorflow as tf
 from tfx import types
 from tfx.components.infra_validator import types as iv_types
-from tfx.components.util import examples_utils
-from tfx.components.util import tfxio_utils
 from tfx.dsl.io import fileio
-from tfx.proto import example_gen_pb2
 from tfx.proto import infra_validator_pb2
 from tfx.types import artifact_utils
 from tfx.utils import path_utils
-from tfx_bsl.tfxio import dataset_options
 
 from tensorflow.python.saved_model import loader_impl  # pylint: disable=g-direct-tensorflow-import
 from tensorflow_serving.apis import classification_pb2
@@ -44,8 +41,6 @@ from tensorflow_serving.apis import regression_pb2
 
 _TENSORFLOW_SERVING = 'tensorflow_serving'
 _DEFAULT_NUM_EXAMPLES = 1
-_RAW_RECORDS_COLUMN = 'raw_records'
-_TELEMETRY_DESCRIPTORS = ['InfraValidator']
 
 _DEFAULT_TAG_SET = frozenset([tf.saved_model.SERVING])
 
@@ -137,12 +132,17 @@ def _parse_saved_model_signatures(
   return result
 
 
+class _LogicalFormat(enum.Enum):
+  UNKNOWN = 0
+  TF_EXAMPLE = 1
+
+
 class _BaseRequestBuilder(six.with_metaclass(abc.ABCMeta, object)):
   """Base class for all RequestBuilders."""
 
   def __init__(self):
     self._records = []  # type: List[bytes]
-    self._payload_format = example_gen_pb2.PayloadFormat.FORMAT_UNSPECIFIED
+    self._record_format = _LogicalFormat.UNKNOWN
 
   # TODO(jjong): The method strongly assumes that the output of ExampleGen is
   # a gzipped TFRecords of tf.Example. We need a better abstraction (e.g. TFXIO)
@@ -180,13 +180,7 @@ class _BaseRequestBuilder(six.with_metaclass(abc.ABCMeta, object)):
               split_name, ', '.join(available_splits)))
 
     # ExampleGen generates artifacts under each split_name directory.
-    glob_pattern = os.path.join(examples.uri, split_name, '*')
-    tfxio_factory = tfxio_utils.get_tfxio_factory_from_artifact(
-        examples=[examples],
-        telemetry_descriptors=_TELEMETRY_DESCRIPTORS,
-        schema=None,
-        read_as_raw_records=True,
-        raw_record_column_name=_RAW_RECORDS_COLUMN)
+    glob_pattern = os.path.join(examples.uri, split_name, '*.gz')
     try:
       filenames = fileio.glob(glob_pattern)
     except tf.errors.NotFoundError:
@@ -195,26 +189,27 @@ class _BaseRequestBuilder(six.with_metaclass(abc.ABCMeta, object)):
       raise ValueError('Unable to find examples matching {}.'.format(
           glob_pattern))
 
-    self._payload_format = examples_utils.get_payload_format(examples)
-    tfxio = tfxio_factory(filenames)
+    # Assume we have a tf.Example logical format.
+    self._record_format = _LogicalFormat.TF_EXAMPLE
 
     self._ReadFromDataset(
-        tfxio.TensorFlowDataset(
-            dataset_options.TensorFlowDatasetOptions(batch_size=num_examples)))
+        tf.data.TFRecordDataset(filenames, compression_type='GZIP'),
+        num_examples=num_examples)
 
-  def _ReadFromDataset(self, dataset: tf.data.Dataset):
-    dataset = dataset.take(1)
+  def _ReadFromDataset(self, dataset: tf.data.TFRecordDataset,
+                       num_examples: int):
+    dataset = dataset.take(num_examples)
     if tf.executing_eagerly():
-      for d in dataset:
-        self._records.extend(d[_RAW_RECORDS_COLUMN].numpy())
+      for raw_example in dataset:
+        self._records.append(raw_example.numpy())
     else:
       it = tf.compat.v1.data.make_one_shot_iterator(dataset)
       next_el = it.get_next()
       with tf.Session() as sess:
         while True:
           try:
-            d = sess.run(next_el)
-            self._records.extend(d[_RAW_RECORDS_COLUMN])
+            raw_example = sess.run(next_el)
+            self._records.append(raw_example)
           except tf.errors.OutOfRangeError:
             break
 
@@ -253,11 +248,8 @@ class _TFServingRpcRequestBuilder(_BaseRequestBuilder):
   @property
   def examples(self) -> List[tf.train.Example]:
     if not self._examples:
-      if (self._payload_format !=
-          example_gen_pb2.PayloadFormat.FORMAT_TF_EXAMPLE):
-        raise ValueError(
-            'Data payload format should be FORMAT_TF_EXAMPLE. Got: {}'.format(
-                example_gen_pb2.PayloadFormat.Name(self._payload_format)))
+      if self._record_format != _LogicalFormat.TF_EXAMPLE:
+        raise ValueError('Record format should be TF_EXAMPLE.')
       for record in self._records:
         example = tf.train.Example()
         example.ParseFromString(record)
