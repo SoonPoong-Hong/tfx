@@ -22,6 +22,8 @@ from tfx.orchestration.kubeflow.v2 import parameter_utils
 from tfx.orchestration.kubeflow.v2 import step_builder
 from tfx.orchestration.kubeflow.v2.proto import pipeline_pb2
 
+from google.protobuf import json_format
+
 
 class RuntimeConfigBuilder(object):
   """Kubeflow pipelines RuntimeConfig builder."""
@@ -114,6 +116,6 @@ class PipelineBuilder(object):
         tasks=tasks,
         runtime_parameters=compiler_utils.build_runtime_parameter_spec(
             pc.parameters))
-    result.deployment_config.Pack(deployment_config)
+    result.deployment_spec.update(json_format.MessageToDict(deployment_config))
 
     return result

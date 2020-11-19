@@ -71,6 +71,8 @@ class KubeflowV2DagRunnerTest(tf.test.TestCase):
       expected_json['labels']['tfx_version'] = telemetry_utils._normalize_label(
           version.__version__)
 
+    print(actual_output)
+
     self.assertDictEqual(actual_output, expected_json)
 
     with open(os.path.join(_TEST_DIR, _TEST_FILE_NAME)) as pipeline_json_file:
